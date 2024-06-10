@@ -1,123 +1,100 @@
-import math
-import os
-from tempfile import TemporaryDirectory
-from typing import Tuple
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-from torch import Tensor, nn
-from torch.nn import TransformerEncoder, TransformerEncoderLayer
-from torch.utils.data import dataset
-
-from utils import get_preferred_device
+from torch.nn import functional as F
+import math
 
 
-class TransformerModel(nn.Module):
-    """
-    A Transformer Model for sequence modeling.
+@dataclass
+class GPTConfig:
+    block_size: int = 256
+    vocab_size: int = 65
+    n_layer: int = 6
+    n_head: int = 6
+    n_embd: int = 384
 
-    Attributes:
-        model_type (str): Type of the model, set to 'Transformer'.
-        pos_encoder (PositionalEncoding): Positional Encoding module.
-        transformer_encoder (TransformerEncoder): Transformer Encoder module.
-        embedding (nn.Embedding): Embedding layer for input tokens.
-        d_model (int): Dimensionality of the model.
-        linear (nn.Linear): Linear layer to map from hidden state to token space.
 
-    Parameters:
-        ntoken (int): Number of tokens (vocabulary size).
-        d_model (int): Dimensionality of the model (embeddings size).
-        nhead (int): Number of heads in the multi-head attention models.
-        d_hid (int): Dimensionality of the feedforward network model in nn.TransformerEncoder.
-        nlayers (int): Number of nn.TransformerEncoderLayer in nn.TransformerEncoder.
-        dropout (float, optional): Dropout value (default=0.5).
-    """
+class MLP(nn.Module):
+    def __init__(self, config):
+        super(MLP, self).__init__()
+        self.fc = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.gelu = nn.GELU(approximate="tanh")
+        self.proj = nn.Linear(4 * config.n_embd, config.n_embd)
 
-    def __init__(
-        self,
-        ntoken: int,
-        d_model: int,
-        nhead: int,
-        d_hid: int,
-        nlayers: int,
-        dropout: float = 0.5,
-    ):
+    def forward(self, x):
+        x = self.fc(x)
+        x = self.gelu(x)
+        x = self.proj(x)
+        return x
+
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, config):
         super().__init__()
-        self.model_type = "Transformer"
-        self.pos_encoder = PositionalEncoding(d_model, dropout)
-        encoder_layers = TransformerEncoderLayer(d_model, nhead, d_hid, dropout)
-        self.transformer_encoder = TransformerEncoder(encoder_layers, nlayers)
-        self.embedding = nn.Embedding(ntoken, d_model)
-        self.d_model = d_model
-        self.linear = nn.Linear(d_model, ntoken)
-        self.device = get_preferred_device()
+        assert config.n_embd % config.n_head == 0
+        self.c_attn = nn.Linear(
+            config.n_embd, 3 * config.n_embd
+        )  # projects embedding to bigger space to extract Q, K, V
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
 
-        self.init_weights()
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
 
-    def init_weights(self) -> None:
-        """Initializes weights of the Transformer model."""
-        initrange = 0.1
-        self.embedding.weight.data.uniform_(-initrange, initrange)
-        self.linear.bias.data.zero_()
-        self.linear.weight.data.uniform_(-initrange, initrange)
-
-    def forward(self, src: Tensor, src_mask: Tensor = None) -> Tensor:
-        """
-        Pass the input through the Transformer model.
-
-        Args:
-            src (Tensor): Input tensor of shape [seq_len, batch_size].
-            src_mask (Tensor, optional): Mask for src tensor of shape [seq_len, seq_len].
-
-        Returns:
-            Tensor: Output tensor of shape [seq_len, batch_size, ntoken].
-        """
-        src = self.embedding(src) * math.sqrt(self.d_model)
-        src = self.pos_encoder(src)
-        if src_mask is None:
-            src_mask = nn.Transformer.generate_square_subsequent_mask(len(src)).to(
-                self.device
-            )
-        output = self.transformer_encoder(src, src_mask)
-        output = self.linear(output)
-        return output
-
-
-class PositionalEncoding(nn.Module):
-    """
-    Adds positional encoding to the input embeddings using sine and cosine functions.
-
-    Attributes:
-        dropout (nn.Dropout): Dropout module to apply after adding positional encoding.
-
-    Parameters:
-        d_model (int): The dimensionality of the embeddings.
-        dropout (float): Dropout rate.
-        max_len (int): The maximum length of the sequence to be encoded.
-    """
-
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
+        self.register_buffer(
+            "bias",
+            torch.tril(torch.ones(config.block_szie, config.block_size)).view(
+                1, 1, config.block_size, config.block_size
+            ),
         )
-        pe = torch.zeros(max_len, 1, d_model)
-        pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe)
 
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Apply positional encoding to the input tensor.
+    def forward(self, x):
+        B, T, C = x.size()  # batch, seq length, embedding depth (n_embd
 
-        Args:
-            x (Tensor): The input tensor of shape [seq_len, batch_size, embedding_dim].
+        qkv = self.c_attn(x)
+        # Split the combined qkv matrix and reshape it to get individual q, k, v matrices
+        q, k, v = qkv.split(self.n_embd, dim=2)
 
-        Returns:
-            Tensor: The encoded tensor with the same shape as `x`.
-        """
-        x = x + self.pe[: x.size(0)]
-        return self.dropout(x)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+        att = F.softmax(att, dim=-1)
+
+        y = att @ v
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+
+        y = self.c_proj(y)
+        return y
+
+
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(config.n_embd)
+        self.attn = CausalSelfAttention(config)
+        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.mlp = MLP(config)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
+
+
+class GPT(nn.Module):
+    def __inti__(self, config):
+        super().__init__()
+        self.config = config
+
+        self.transformer = nn.ModuleDict(
+            {
+                "wte": nn.Embedding(config.vocab_size, config.n_embd),
+                "wpe": nn.Embedding(config.block_size, config.n_embd),
+                "h": nn.ModuleList([Block(config) for idx in range(config.n_layer)]),
+                "ln_f": nn.LayerNorm(config.n_embd),
+            }
+        )
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=None)
