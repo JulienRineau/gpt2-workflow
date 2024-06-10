@@ -1,9 +1,9 @@
+import math
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import math
 
 
 @dataclass
@@ -16,13 +16,21 @@ class GPTConfig:
 
 
 class MLP(nn.Module):
-    def __init__(self, config):
+    """A multilayer perceptron (MLP) module used within transformer blocks as a feed-forward network.
+
+    Attributes:
+        fc (nn.Linear): The first fully connected layer.
+        gelu (nn.GELU): Gaussian Error Linear Unit activation layer.
+        proj (nn.Linear): The second fully connected layer projecting back to embedding dimension.
+    """
+
+    def __init__(self, config: GPTConfig):
         super(MLP, self).__init__()
         self.fc = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.gelu = nn.GELU(approximate="tanh")
         self.proj = nn.Linear(4 * config.n_embd, config.n_embd)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.fc(x)
         x = self.gelu(x)
         x = self.proj(x)
@@ -30,7 +38,15 @@ class MLP(nn.Module):
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config):
+    """Causal multihead self-attention implementation.
+
+    Attributes:
+        c_attn (nn.Linear): Linear layer to create queries, keys, and values.
+        c_proj (nn.Linear): Linear layer to project the output of attention back to the embedding dimension.
+        bias (torch.Tensor): Buffer for the causal mask.
+    """
+
+    def __init__(self, config: GPTConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.c_attn = nn.Linear(
@@ -48,7 +64,7 @@ class CausalSelfAttention(nn.Module):
             ),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.size()  # batch, seq length, embedding depth (n_embd
 
         qkv = self.c_attn(x)
@@ -71,21 +87,29 @@ class CausalSelfAttention(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config):
+    """A single transformer block containing a layer normalization, a causal self-attention layer,
+    another layer normalization, and an MLP.
+    """
+
+    def __init__(self, config: GPTConfig):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
 
 
 class GPT(nn.Module):
-    def __inti__(self, config):
+    """The full GPT model comprising an embedding layer, multiple transformer blocks,
+    a final layer normalization, and a linear layer for language modeling head.
+    """
+
+    def __init__(self, config: GPTConfig):
         super().__init__()
         self.config = config
 
