@@ -15,11 +15,11 @@ def get_preferred_device():
     """
     if torch.cuda.is_available():
         logging.info("Using CUDA device.")
-        return torch.device("cuda")
+        return "cuda"
 
     if torch.backends.mps.is_available():
         logging.info("Using MPS device.")
-        return torch.device("mps")
+        return "mps"
     else:
         if not torch.backends.mps.is_built():
             logging.info(
@@ -31,7 +31,7 @@ def get_preferred_device():
             )
 
     logging.info("Using CPU device.")
-    return torch.device("cpu")
+    return "cpu"
 
 
 if __name__ == "__main__":

@@ -1,12 +1,19 @@
 # based on Karpathy's nanoGPT: https://github.com/karpathy/nanoGPT/
 
+import logging
 import math
 from dataclasses import dataclass
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import logging
+from utils import get_preferred_device
+from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+
+
+import tiktoken
 
 
 @dataclass
@@ -57,6 +64,7 @@ class CausalSelfAttention(nn.Module):
             config.n_embd, 3 * config.n_embd
         )  # projects embedding to bigger space to extract Q, K, V
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
 
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -118,22 +126,88 @@ class GPT(nn.Module):
         self.config = config
 
         self.transformer = nn.ModuleDict(
-            {
-                "wte": nn.Embedding(config.vocab_size, config.n_embd),
-                "wpe": nn.Embedding(config.block_size, config.n_embd),
-                "h": nn.ModuleList([Block(config) for idx in range(config.n_layer)]),
-                "ln_f": nn.LayerNorm(config.n_embd),
-            }
+            dict(
+                wte=nn.Embedding(config.vocab_size, config.n_embd),
+                wpe=nn.Embedding(config.block_size, config.n_embd),
+                h=nn.ModuleList(
+                    [Block(config) for _ in range(config.n_layer)]
+                ),  # stands for hidden
+                ln_f=nn.LayerNorm(config.n_embd),
+            )
         )
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=None)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # weight tying between the embedding layers and the pre-softmax linear transformation
+        self.transformer.wte.weight = self.lm_head.weight
+
+        self.apply(self._init_weights)  # iterate all submodules
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, "NANOGPT_SCALE_INIT"):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(
+        self, idx: torch.Tensor, targets=None
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Args:
+            idx (torch.Tensor): Input tensor of token indices of shape (B, T).
+
+        Returns:
+            torch.Tensor,: Logits of shape (B, T, vocab_size).
+
+        Raises:
+            AssertionError: If the sequence length T is greater than the model's block size.
+        """
+        B, T = idx.size()
+        assert (
+            T <= self.config.block_size
+        ), f"Cannot forward sequence of length {T}, block size is only size {self.config.block_size}"
+
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        pos_emb = self.transformer.wpe(pos)  # (T, n_embd)
+        tok_emb = self.transformer.wte(idx)  # (B, T, n_embd)
+        x = tok_emb + pos_emb
+
+        for block in self.transformer.h:
+            x = block(x)
+
+        x = self.transformer.ln_f(x)  # final layer norm
+        logits = self.lm_head(x)  # (B, T, vocab_size)
+
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), targets.view(-1)
+            )  # flattening out logits because cross entropy do not accept high dimensions
+        return logits, loss
 
     @classmethod
-    def from_pretrained(cls, model_type):
+    def from_pretrained(cls, model_type: str) -> "GPT":
+        """
+        Loads a pretrained GPT model from the Hugging Face transformers library based on the specified model type.
+
+        Args:
+            model_type (str): Type of the GPT model to load. Valid options are "gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl".
+
+        Returns:
+            GPT: An instance of the GPT model with weights loaded from the pretrained model.
+
+        Raises:
+            AssertionError: If there's a mismatch in the expected and actual configuration of model parameters.
+        """
         """Loads pretrained GPT-2 model weights from huggingface"""
         assert model_type in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}
         from transformers import GPT2LMHeadModel
 
-        print("loading weights from pretrained gpt: %s" % model_type)
+        logging.info("loading weights from pretrained gpt: %s" % model_type)
 
         # n_layer, n_head and n_embd are determined from model_type
         config_args = {
@@ -191,7 +265,120 @@ class GPT(nn.Module):
         return model
 
 
+class TextDataset(Dataset):
+    """Custom Dataset for loading and processing text for language modeling."""
+
+    def __init__(self, T: int):
+        """
+        Initializes the TextDataset with the path to the text file and sequence length (block size).
+
+        Args:
+            file_path (str): The path to the text file.
+            T (int): block_size, t number of tokens in each sample (sequence length).
+        """
+        with open("input.txt", "r") as f:
+            text = f.read()
+
+        tokenizer = tiktoken.get_encoding("gpt2")
+        tokens = tokenizer.encode(text)
+        self.tokens = torch.tensor(tokens, dtype=torch.long)
+        self.block_size = T
+
+    def __len__(self):
+        """Returns the total number of samples available."""
+        return len(self.tokens) // self.block_size
+
+    def __getitem__(self, idx):
+        """Generates one sample of data."""
+        start_idx = idx * self.block_size
+        end_idx = start_idx + self.block_size + 1  # +1 for target shift
+        buf = self.tokens[start_idx:end_idx]
+        x = buf[:-1]  # inputs
+        y = buf[1:]  # targets
+        return x, y
+
+
+class TextDataLoader(DataLoader):
+    """Custom DataLoader to handle batching for text data."""
+
+    def __init__(self, B: int, T: int, **kwargs):
+        """
+        Initializes the TextDataLoader with a dataset, batch size, and additional DataLoader arguments.
+
+        Args:
+            dataset (Dataset): The dataset from which to load the data.
+            B (int): batch_size, the number of samples per batch.
+        """
+        super(TextDataLoader, self).__init__(TextDataset(T=T), batch_size=B, **kwargs)
+
+
 if __name__ == "__main__":
-    model_name = "gpt2"
-    model = GPT.from_pretrained(model_name)
-    logging.info(f"{model_name} loaded successfully")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+
+    num_return_sequences = 5
+    max_length = 30
+
+    device = get_preferred_device()
+    torch.manual_seed(1337)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(1337)
+    elif torch.backends.mps.is_built():
+        torch.mps.manual_seed(1337)
+
+    data_loader = TextDataLoader(B=4, T=32)
+
+    # model_type = "gpt2"
+    # model = GPT.from_pretrained(model_type)
+    model = GPT(GPTConfig())
+    model.to(device)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    for epoch in range(50):
+        data_iter = iter(data_loader)
+        for _ in range(epoch + 1):
+            try:
+                x, y = next(data_iter)
+            except StopIteration:
+                # Restart the iterator if the number of epochs exceeds the number of batches
+                data_iter = iter(data_loader)
+                x, y = next(data_iter)
+
+        x, y = x.to(device), y.to(device)
+
+        optimizer.zero_grad()
+        logits, loss = model(x, y)  # Ensure your model returns logits and loss
+        loss.backward()
+        optimizer.step()
+        print(f"Epoch {epoch}, Loss: {loss.item()}")
+
+    import sys
+
+    sys.exit(0)
+
+    model.eval()
+
+    enc = tiktoken.get_encoding("gpt2")
+    tokens = enc.encode("Hello, I'm a language model, ")
+    tokens = torch.tensor(tokens, dtype=torch.long)
+    tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # (5, 8)
+    x = tokens.to(device)
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+
+    while x.size(1) < max_length:
+        with torch.no_grad():
+            logits = model(x)  # (B, T, vocab_size)
+            logits = logits[:, -1, :]  # (B, vocab_size)
+            probs = F.softmax(logits, dim=-1)
+            topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+            ix = torch.multinomial(topk_probs, 1)  # (B, 1)
+            xcol = torch.gather(topk_indices, -1, ix)  # (B, 1)
+            x = torch.cat((x, xcol), dim=1)
+
+    for i in range(num_return_sequences):
+        tokens = x[i, :max_length].tolist()
+        decoded = enc.decode(tokens)
+        print(">", decoded)
