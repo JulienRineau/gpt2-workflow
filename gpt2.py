@@ -336,7 +336,7 @@ if __name__ == "__main__":
 
     # model_type = "gpt2"
     # model = GPT.from_pretrained(model_type)
-    model = GPT(GPTConfig())
+    model = GPT(GPTConfig(vocab_size=50304))
     model.to(device)
     try:  # not supported in torch 2.3 with python 3.12+
         logging.info("Compiling model...")
