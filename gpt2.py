@@ -330,9 +330,7 @@ if __name__ == "__main__":
         torch.mps.manual_seed(1337)
 
     if device == "cuda":
-        train_data_loader = TextDataLoader(
-            B=16, T=1024, num_workers=16, pin_memory=True
-        )
+        train_data_loader = TextDataLoader(B=16, T=1024)
     else:
         train_data_loader = TextDataLoader(B=4, T=32)
 
