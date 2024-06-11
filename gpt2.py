@@ -309,6 +309,8 @@ class TextDataLoader(DataLoader):
             dataset (Dataset): The dataset from which to load the data.
             B (int): batch_size, the number of samples per batch.
         """
+        self.B = B
+        self.T = T
         super(TextDataLoader, self).__init__(TextDataset(T=T), batch_size=B, **kwargs)
 
 
@@ -324,10 +326,17 @@ if __name__ == "__main__":
     torch.manual_seed(1337)
     if device == "cuda":
         torch.cuda.manual_seed(1337)
+        try:
+            torch.set_float32_matmul_precision("high")  # use tensorcores
+        except:
+            pass
     elif device == "mps":
         torch.mps.manual_seed(1337)
 
-    data_loader = TextDataLoader(B=16, T=1024)
+    if device == "cuda":
+        train_data_loader = TextDataLoader(B=16, T=1024)
+    else:
+        train_data_loader = TextDataLoader(B=4, T=32)
 
     # model_type = "gpt2"
     # model = GPT.from_pretrained(model_type)
@@ -337,19 +346,23 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     for epoch in range(50):
         t0 = time.time()
-        data_iter = iter(data_loader)
+        data_iter = iter(train_data_loader)
         for _ in range(epoch + 1):
             try:
                 x, y = next(data_iter)
             except StopIteration:
                 # Restart the iterator if the number of epochs exceeds the number of batches
-                data_iter = iter(data_loader)
+                data_iter = iter(train_data_loader)
                 x, y = next(data_iter)
 
         x, y = x.to(device), y.to(device)
 
         optimizer.zero_grad()
-        logits, loss = model(x, y)  # Ensure your model returns logits and loss
+        if device == "cuda":
+            with torch.autocast(device_type=device):
+                logits, loss = model(x, y)  # Ensure your model returns logits and loss
+        else:
+            logits, loss = model(x, y)
         loss.backward()
         optimizer.step()
         if device == "cuda":
@@ -358,7 +371,10 @@ if __name__ == "__main__":
             torch.mps.synchronize()
         t1 = time.time()
         dt = (t1 - t0) * 1000
-        print(f"Epoch {epoch}, Loss: {loss.item()}, dt: {dt:.2f}ms")
+        tokens_per_sec = (train_data_loader.B * train_data_loader.T) / (t1 - t0)
+        print(
+            f"Epoch {epoch}, Loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec}"
+        )
 
     import sys
 
