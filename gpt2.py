@@ -342,6 +342,11 @@ if __name__ == "__main__":
     # model = GPT.from_pretrained(model_type)
     model = GPT(GPTConfig())
     model.to(device)
+    try:  # not supported in torch 2.3 with python 3.12+
+        logging.info("Compiling model...")
+        model = torch.compile(model)
+    except:
+        pass
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     for epoch in range(50):
@@ -373,7 +378,7 @@ if __name__ == "__main__":
         dt = (t1 - t0) * 1000
         tokens_per_sec = (train_data_loader.B * train_data_loader.T) / (t1 - t0)
         print(
-            f"Epoch {epoch}, Loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec}"
+            f"Epoch {epoch}, Loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}"
         )
 
     import sys
