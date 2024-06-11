@@ -2,18 +2,18 @@
 
 import logging
 import math
+import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+import tiktoken
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from utils import get_preferred_device
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-
-import tiktoken
+from utils import get_preferred_device
 
 
 @dataclass
@@ -322,12 +322,12 @@ if __name__ == "__main__":
 
     device = get_preferred_device()
     torch.manual_seed(1337)
-    if torch.cuda.is_available():
+    if device == "cuda":
         torch.cuda.manual_seed(1337)
-    elif torch.backends.mps.is_built():
+    elif device == "mps":
         torch.mps.manual_seed(1337)
 
-    data_loader = TextDataLoader(B=4, T=32)
+    data_loader = TextDataLoader(B=16, T=1024)
 
     # model_type = "gpt2"
     # model = GPT.from_pretrained(model_type)
@@ -336,6 +336,7 @@ if __name__ == "__main__":
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     for epoch in range(50):
+        t0 = time.time()
         data_iter = iter(data_loader)
         for _ in range(epoch + 1):
             try:
@@ -351,7 +352,13 @@ if __name__ == "__main__":
         logits, loss = model(x, y)  # Ensure your model returns logits and loss
         loss.backward()
         optimizer.step()
-        print(f"Epoch {epoch}, Loss: {loss.item()}")
+        if device == "cuda":
+            torch.cuda.synchronize()
+        elif device == "mps":
+            torch.mps.synchronize()
+        t1 = time.time()
+        dt = (t1 - t0) * 1000
+        print(f"Epoch {epoch}, Loss: {loss.item()}, dt: {dt:.2f}ms")
 
     import sys
 
