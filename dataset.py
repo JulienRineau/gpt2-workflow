@@ -58,7 +58,7 @@ def tokenize(doc):
 class HuggingFaceTextDataset(IterableDataset):
     """Custom Iterable Dataset for loading and processing large text documents from Hugging Face datasets for language modeling."""
 
-    def __init__(self, dataset_name, dataset_config, split, sequence_length):
+    def __init__(self, dataset_name, dataset_config, split, sequence_length, nb_tokens):
         """
         Initializes the dataset with dataset information and sequence length.
 
@@ -72,6 +72,7 @@ class HuggingFaceTextDataset(IterableDataset):
             dataset_name, dataset_config, split=split, streaming=True
         )
         self.sequence_length = sequence_length
+        self.nb_tokens = nb_tokens
 
     def __iter__(self):
         """
@@ -99,6 +100,10 @@ class HuggingFaceTextDataset(IterableDataset):
                     y, dtype=torch.long
                 )
 
+    def __len__(self):
+        """Returns the total number of samples available."""
+        return len(self.nb_tokens) // self.sequence_length
+
 
 if __name__ == "__main__":
     sequence_length = 1024
@@ -113,6 +118,7 @@ if __name__ == "__main__":
             dataset_config="sample-10BT",
             split="train",
             sequence_length=32,
+            nb_tokens=9.6e9,  # Because of streaming cannot have the exact number of token so use an estimate
         ),
         batch_size=4,
     )
