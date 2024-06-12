@@ -1,19 +1,12 @@
 # based on Karpathy's nanoGPT: https://github.com/karpathy/nanoGPT/
 
 import logging
-import math
-import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-import tiktoken
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
-
-from utils import get_preferred_device
 
 
 @dataclass
@@ -26,8 +19,7 @@ class GPTConfig:
 
 
 class MLP(nn.Module):
-    """A multilayer perceptron (MLP) module used within transformer blocks as a feed-forward network.
-
+    """
     Attributes:
         fc (nn.Linear): The first fully connected layer.
         gelu (nn.GELU): Gaussian Error Linear Unit activation layer.
@@ -77,7 +69,7 @@ class CausalSelfAttention(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.size()  # batch, seq length, embedding depth (n_embd
+        B, T, C = x.size()  # batch, seq length, embedding depth, n_embd
 
         qkv = self.c_attn(x)
         # Split the combined qkv matrix and reshape it to get individual q, k, v matrices
@@ -241,163 +233,17 @@ class GPT(nn.Module):
             "mlp.c_fc.weight",
             "mlp.c_proj.weight",
         ]
-        # openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
-        # this means that we have to transpose these weights when we import them
         assert len(sd_keys_hf) == len(
             sd_keys
         ), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
         for k in sd_keys_hf:
             if any(k.endswith(w) for w in transposed):
-                # special treatment for the Conv1D weights we need to transpose
                 assert sd_hf[k].shape[::-1] == sd[k].shape
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k].t())
             else:
-                # vanilla copy over the other parameters
                 assert sd_hf[k].shape == sd[k].shape
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k])
 
         return model
-
-
-class TextDataset(Dataset):
-    """Custom Dataset for loading and processing text for language modeling."""
-
-    def __init__(self, sequence_length: int):
-        """
-        Initializes the TextDataset with the path to the text file and sequence length (block size).
-
-        Args:
-            file_path (str): The path to the text file.
-            sequence_length (int): The number of tokens in each sample
-        """
-        with open("input.txt", "r") as f:
-            text = f.read()
-
-        tokenizer = tiktoken.get_encoding("gpt2")
-        tokens = tokenizer.encode(text)
-        self.tokens = torch.tensor(tokens, dtype=torch.long)
-        self.sequence_length = sequence_length
-
-    def __len__(self):
-        """Returns the total number of samples available."""
-        return len(self.tokens) // self.sequence_length
-
-    def __getitem__(self, idx):
-        """Generates one sample of data."""
-        start_idx = idx * self.sequence_length
-        end_idx = start_idx + self.sequence_length + 1  # +1 for target shift
-        buf = self.tokens[start_idx:end_idx]
-        x = buf[:-1]  # inputs
-        y = buf[1:]  # targets
-        return x, y
-
-
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
-
-    num_return_sequences = 5
-    max_length = 30
-
-    device = get_preferred_device()
-    torch.manual_seed(1337)
-    if device == "cuda":
-        torch.cuda.manual_seed(1337)
-        try:
-            torch.set_float32_matmul_precision("high")  # use tensorcores
-        except:
-            pass
-    elif device == "mps":
-        torch.mps.manual_seed(1337)
-
-    if device == "cuda":
-        train_data_loader = DataLoader(
-            TextDataset(sequence_length=1024), batch_size=16, shuffle=True
-        )
-    else:
-        train_data_loader = DataLoader(
-            TextDataset(sequence_length=32), batch_size=4, shuffle=True
-        )
-
-    # model_type = "gpt2"
-    # model = GPT.from_pretrained(model_type)
-    model = GPT(GPTConfig(vocab_size=50304))
-    model.to(device)
-    try:  # not supported in torch 2.3 with python 3.12+
-        logging.info("Compiling model...")
-        model = torch.compile(model)
-    except:
-        pass
-
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=3e-4, betas=[0.9, 0.95], eps=1e-8
-    )
-    for step in range(50):
-        t0 = time.time()
-        data_iter = iter(train_data_loader)
-        for _ in range(step + 1):
-            try:
-                x, y = next(data_iter)
-            except StopIteration:
-                # Restart the iterator if the number of step exceeds the number of batches
-                data_iter = iter(train_data_loader)
-                x, y = next(data_iter)
-
-        x, y = x.to(device), y.to(device)
-
-        optimizer.zero_grad()
-        if device == "cuda":
-            with torch.autocast(device_type=device):
-                logits, loss = model(x, y)  # Ensure your model returns logits and loss
-        else:
-            logits, loss = model(x, y)
-        loss.backward()
-        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-        for param_group in optimizer.param_groups:
-            param_group["lr"]
-
-        optimizer.step()
-        if device == "cuda":
-            torch.cuda.synchronize()
-        elif device == "mps":
-            torch.mps.synchronize()
-        t1 = time.time()
-        dt = (t1 - t0) * 1000
-        tokens_per_sec = (train_data_loader.B * train_data_loader.T) / (t1 - t0)
-        print(
-            f"Step {step} | Loss: {loss.item()} | norm: {norm:.4f} | dt: {dt:.2f}ms | tok/sec: {tokens_per_sec:.2f}"
-        )
-
-    import sys
-
-    sys.exit(0)
-
-    model.eval()
-
-    enc = tiktoken.get_encoding("gpt2")
-    tokens = enc.encode("Hello, I'm a language model, ")
-    tokens = torch.tensor(tokens, dtype=torch.long)
-    tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # (5, 8)
-    x = tokens.to(device)
-
-    torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
-
-    while x.size(1) < max_length:
-        with torch.no_grad():
-            logits = model(x)  # (B, T, vocab_size)
-            logits = logits[:, -1, :]  # (B, vocab_size)
-            probs = F.softmax(logits, dim=-1)
-            topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-            ix = torch.multinomial(topk_probs, 1)  # (B, 1)
-            xcol = torch.gather(topk_indices, -1, ix)  # (B, 1)
-            x = torch.cat((x, xcol), dim=1)
-
-    for i in range(num_return_sequences):
-        tokens = x[i, :max_length].tolist()
-        decoded = enc.decode(tokens)
-        print(">", decoded)

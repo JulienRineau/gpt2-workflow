@@ -163,3 +163,4 @@ cython_debug/
 input.txt
 play.ipynb
 wandb
+gpt2
