@@ -264,13 +264,13 @@ class GPT(nn.Module):
 class TextDataset(Dataset):
     """Custom Dataset for loading and processing text for language modeling."""
 
-    def __init__(self, T: int):
+    def __init__(self, sequence_length: int):
         """
         Initializes the TextDataset with the path to the text file and sequence length (block size).
 
         Args:
             file_path (str): The path to the text file.
-            T (int): block_size, t number of tokens in each sample (sequence length).
+            sequence_length (int): The number of tokens in each sample
         """
         with open("input.txt", "r") as f:
             text = f.read()
@@ -278,36 +278,20 @@ class TextDataset(Dataset):
         tokenizer = tiktoken.get_encoding("gpt2")
         tokens = tokenizer.encode(text)
         self.tokens = torch.tensor(tokens, dtype=torch.long)
-        self.block_size = T
+        self.sequence_length = sequence_length
 
     def __len__(self):
         """Returns the total number of samples available."""
-        return len(self.tokens) // self.block_size
+        return len(self.tokens) // self.sequence_length
 
     def __getitem__(self, idx):
         """Generates one sample of data."""
-        start_idx = idx * self.block_size
-        end_idx = start_idx + self.block_size + 1  # +1 for target shift
+        start_idx = idx * self.sequence_length
+        end_idx = start_idx + self.sequence_length + 1  # +1 for target shift
         buf = self.tokens[start_idx:end_idx]
         x = buf[:-1]  # inputs
         y = buf[1:]  # targets
         return x, y
-
-
-class TextDataLoader(DataLoader):
-    """Custom DataLoader to handle batching for text data."""
-
-    def __init__(self, B: int, T: int, **kwargs):
-        """
-        Initializes the TextDataLoader with a dataset, batch size, and additional DataLoader arguments.
-
-        Args:
-            dataset (Dataset): The dataset from which to load the data.
-            B (int): batch_size, the number of samples per batch.
-        """
-        self.B = B
-        self.T = T
-        super(TextDataLoader, self).__init__(TextDataset(T=T), batch_size=B, **kwargs)
 
 
 if __name__ == "__main__":
@@ -330,9 +314,13 @@ if __name__ == "__main__":
         torch.mps.manual_seed(1337)
 
     if device == "cuda":
-        train_data_loader = TextDataLoader(B=16, T=1024)
+        train_data_loader = DataLoader(
+            TextDataset(sequence_length=1024), batch_size=16, shuffle=True
+        )
     else:
-        train_data_loader = TextDataLoader(B=4, T=32)
+        train_data_loader = DataLoader(
+            TextDataset(sequence_length=32), batch_size=4, shuffle=True
+        )
 
     # model_type = "gpt2"
     # model = GPT.from_pretrained(model_type)
@@ -344,15 +332,17 @@ if __name__ == "__main__":
     except:
         pass
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-    for epoch in range(50):
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=3e-4, betas=[0.9, 0.95], eps=1e-8
+    )
+    for step in range(50):
         t0 = time.time()
         data_iter = iter(train_data_loader)
-        for _ in range(epoch + 1):
+        for _ in range(step + 1):
             try:
                 x, y = next(data_iter)
             except StopIteration:
-                # Restart the iterator if the number of epochs exceeds the number of batches
+                # Restart the iterator if the number of step exceeds the number of batches
                 data_iter = iter(train_data_loader)
                 x, y = next(data_iter)
 
@@ -365,6 +355,11 @@ if __name__ == "__main__":
         else:
             logits, loss = model(x, y)
         loss.backward()
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+        for param_group in optimizer.param_groups:
+            param_group["lr"]
+
         optimizer.step()
         if device == "cuda":
             torch.cuda.synchronize()
@@ -374,7 +369,7 @@ if __name__ == "__main__":
         dt = (t1 - t0) * 1000
         tokens_per_sec = (train_data_loader.B * train_data_loader.T) / (t1 - t0)
         print(
-            f"Epoch {epoch}, Loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}"
+            f"Step {step} | Loss: {loss.item()} | norm: {norm:.4f} | dt: {dt:.2f}ms | tok/sec: {tokens_per_sec:.2f}"
         )
 
     import sys
