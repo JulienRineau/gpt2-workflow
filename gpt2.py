@@ -62,7 +62,7 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.size()  # batch, seq length, embedding depth, n_embd
+        B, T, C = x.size()  # batch, seq length, embedding depth
 
         qkv = self.c_attn(x)
         # Split the combined qkv matrix and reshape it to get individual q, k, v matrices
@@ -87,7 +87,7 @@ class Block(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config)
+        self.attn = config
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 

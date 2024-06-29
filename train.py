@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 import wandb
 from dataset import TextDataset
-from gpt2 import GPT, GPTConfig, TextDataset
+from gpt2 import GPT, GPTConfig
 
 
 @dataclass
