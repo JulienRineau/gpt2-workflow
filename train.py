@@ -49,19 +49,6 @@ class GPTLightning(pl.LightningModule):
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
         return self.min_lr + coeff * (self.max_lr - self.min_lr)
 
-    def forward(self, idx, targets=None):
-        logits, loss = self.model(idx, targets)
-        return logits
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            self.parameters(),
-            weight_decay=0.1,
-            betas=[0.9, 0.95],
-            eps=1e-8,
-        )
-        return optimizer
-
     def optimizer_step(
         self,
         epoch,
@@ -76,6 +63,24 @@ class GPTLightning(pl.LightningModule):
             param_group["lr"] = lr
         optimizer.step(closure=optimizer_closure)
         # optimizer.zero_grad()
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        if self.trainer.global_step >= self.max_lr_steps:
+            for param_group in self.trainer.optimizers[0].param_groups:
+                param_group["lr"] = self.min_lr
+
+    def forward(self, idx, targets=None):
+        logits, loss = self.model(idx, targets)
+        return logits
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            weight_decay=0.1,
+            betas=[0.9, 0.95],
+            eps=1e-8,
+        )
+        return optimizer
 
     def training_step(self, batch, batch_idx):
         start_time = time.time()  # Start timer
@@ -95,11 +100,6 @@ class GPTLightning(pl.LightningModule):
         self.log("learning_rate", current_lr, on_step=True, logger=True)
 
         return loss
-
-    def on_train_batch_end(self, outputs, batch, batch_idx):
-        if self.trainer.global_step >= self.max_lr_steps:
-            for param_group in self.trainer.optimizers[0].param_groups:
-                param_group["lr"] = self.min_lr
 
     def train_dataloader(self):
         dataloader = DataLoader(
