@@ -9,7 +9,7 @@ from pytorch_lightning.loggers import WandbLogger
 from torch.utils.data import DataLoader
 
 import wandb
-from dataset import TextDataset
+from dataset import LocalTextDataset
 from gpt2 import GPT, GPTConfig
 
 
@@ -103,7 +103,7 @@ class GPTLightning(pl.LightningModule):
 
     def train_dataloader(self):
         dataloader = DataLoader(
-            TextDataset(sequence_length=self.sequence_length),
+            LocalTextDataset(sequence_length=self.sequence_length),
             batch_size=self.batch_size,
             shuffle=True,
         )

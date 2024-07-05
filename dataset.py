@@ -9,12 +9,12 @@ from torch.utils.data import Dataset, IterableDataset, DataLoader
 from tqdm import tqdm
 
 
-class TextDataset(Dataset):
+class LocalTextDataset(Dataset):
     """Custom Dataset for loading and processing text for language modeling."""
 
     def __init__(self, sequence_length: int):
         """
-        Initializes the TextDataset with the path to the text file and sequence length (block size).
+        Initializes the LocalTextDataset with the path to the text file and sequence length (block size).
 
         Args:
             file_path (str): The path to the text file.
@@ -55,7 +55,7 @@ def tokenize(doc):
     return tokens_np_uint16
 
 
-class HuggingFaceTextDataset(IterableDataset):
+class HuggingFaceStreamingTextDataset(IterableDataset):
     """Custom Iterable Dataset for loading and processing large text documents from Hugging Face datasets for language modeling."""
 
     def __init__(self, dataset_name, dataset_config, split, sequence_length, nb_tokens):
@@ -107,13 +107,13 @@ class HuggingFaceTextDataset(IterableDataset):
 
 if __name__ == "__main__":
     sequence_length = 1024
-    dataset = HuggingFaceTextDataset(
+    dataset = HuggingFaceStreamingTextDataset(
         "HuggingFaceFW/fineweb-edu", "sample-10BT", "train", sequence_length
     )
     data_iter = iter(dataset)
 
     dataloader = DataLoader(
-        HuggingFaceTextDataset(
+        HuggingFaceStreamingTextDataset(
             dataset_name="HuggingFaceFW/fineweb-edu",
             dataset_config="sample-10BT",
             split="train",
