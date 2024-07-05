@@ -87,7 +87,7 @@ class Block(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = config
+        self.attn = CausalSelfAttention(config)  # Change this line
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
@@ -134,9 +134,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(
-        self, idx: torch.Tensor, targets=None
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(self, idx: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Args:
             idx (torch.Tensor): Input tensor of token indices of shape (B, T).
@@ -163,12 +161,7 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)  # final layer norm
         logits = self.lm_head(x)  # (B, T, vocab_size)
 
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), targets.view(-1)
-            )  # flattening out logits because cross entropy do not accept high dimensions
-        return logits, loss
+        return logits
 
     @classmethod
     def from_pretrained(cls, model_type: str) -> "GPT":

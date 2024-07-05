@@ -5,11 +5,12 @@ from dataclasses import dataclass
 
 import pytorch_lightning as pl
 import torch
+import wandb
 from pytorch_lightning.loggers import WandbLogger
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
-import wandb
-from dataset import LocalTextDataset
+from dataset import create_train_val_datasets
 from gpt2 import GPT, GPTConfig
 
 
@@ -28,6 +29,7 @@ class GPTLightning(pl.LightningModule):
         self,
         model_config: GPTConfig,
         trainer_config: TrainerConfig,
+        debug_mode: bool = False
     ):
         super().__init__()
         self.model = GPT(model_config)
@@ -38,6 +40,12 @@ class GPTLightning(pl.LightningModule):
         self.min_lr = trainer_config.min_lr
         self.warmup_steps = trainer_config.warmup_steps
         self.save_hyperparameters()
+        self.train_dataset, self.val_dataset = create_train_val_datasets(
+            "HuggingFaceFW/fineweb-edu",
+            "sample-10BT",
+            sequence_length=1024,
+            debug_mode=debug_mode,
+        )
 
     def get_lr(self, it):
         if it < self.warmup_steps:
@@ -62,15 +70,14 @@ class GPTLightning(pl.LightningModule):
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
         optimizer.step(closure=optimizer_closure)
-        # optimizer.zero_grad()
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         if self.trainer.global_step >= self.max_lr_steps:
             for param_group in self.trainer.optimizers[0].param_groups:
                 param_group["lr"] = self.min_lr
 
-    def forward(self, idx, targets=None):
-        logits, loss = self.model(idx, targets)
+    def forward(self, idx):
+        logits = self.model(idx)
         return logits
 
     def configure_optimizers(self):
@@ -84,29 +91,42 @@ class GPTLightning(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         start_time = time.time()  # Start timer
-
         x, y = batch
-        logits, loss = self.model(x, y)
-
-        # Logging
-        self.log("train_loss", loss, on_step=True, prog_bar=True, logger=True)
-
+        logits = self.model(x)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+        
+        # Calculate perplexity
+        perplexity = torch.exp(loss)
+        
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log("train_perplexity", perplexity, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        
         dt = time.time() - start_time
         tokens_per_sec = (self.batch_size * x.size(1)) / dt
         current_lr = self.trainer.optimizers[0].param_groups[0]["lr"]
-
         self.log("dt", dt, on_step=True, logger=True)
         self.log("tokens_per_sec", tokens_per_sec, on_step=True, logger=True)
         self.log("learning_rate", current_lr, on_step=True, logger=True)
+        return loss
 
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        logits = self.model(x)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+        
+        # Calculate perplexity
+        perplexity = torch.exp(loss)
+        
+        self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val_perplexity", perplexity, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
     def train_dataloader(self):
-        dataloader = DataLoader(
-            LocalTextDataset(sequence_length=self.sequence_length),
-            batch_size=self.batch_size,
-            shuffle=True,
-        )
+        dataloader = DataLoader(self.train_dataset, batch_size=32)
+        return dataloader
+
+    def val_dataloader(self):
+        dataloader = DataLoader(self.val_dataset, batch_size=32)
         return dataloader
 
 
@@ -118,10 +138,10 @@ if __name__ == "__main__":
 
     model_config = GPTConfig(vocab_size=50304)
     trainer_config = TrainerConfig()
-    model = GPTLightning(model_config, trainer_config)
+    model = GPTLightning(model_config, trainer_config, debug_mode=True)
 
     trainer = pl.Trainer(
-        max_epochs=50,
+        max_epochs=10,
         # max_steps=50,
         precision="bf16-mixed",
         logger=wandb_logger,

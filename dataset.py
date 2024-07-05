@@ -5,7 +5,7 @@ import numpy as np
 import tiktoken
 import torch
 from datasets import load_dataset
-from torch.utils.data import Dataset, IterableDataset, DataLoader
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 from tqdm import tqdm
 
 
@@ -42,57 +42,38 @@ class LocalTextDataset(Dataset):
         return x, y
 
 
-def tokenize(doc):
-    enc = tiktoken.get_encoding("gpt2")
-    eot = enc._special_tokens["<|endoftext|>"]
-    tokens = [eot]  # the special  token delimits all documents
-    tokens.extend(enc.encode_ordinary(doc["text"][0]))
-    tokens_np = np.array(tokens)
-    assert (0 <= tokens_np).all() and (
-        tokens_np < 2**16
-    ).all(), "token dictionary too large for uint16"
-    tokens_np_uint16 = tokens_np.astype(np.uint16)
-    return tokens_np_uint16
-
 class HuggingFacePreparedTextDataset(Dataset):
     """Custom Dataset for loading and processing large text documents from Hugging Face datasets for language modeling."""
-    
-    def __init__(self, dataset_name, dataset_config, split, sequence_length: int = 1024, debug_mode: bool = False):
+
+    def __init__(self, dataset, sequence_length: int = 1024):
         """
         Initializes the dataset with dataset information and sequence length.
         Args:
-        dataset_name (str): Name of the dataset in Hugging Face datasets.
-        dataset_config (str): Specific configuration or subset of the dataset.
-        split (str): Which split of the dataset to load (e.g., 'train').
+        dataset: A Hugging Face dataset (or subset)
         sequence_length (int): The number of tokens in each sample.
-        debug_mode (bool): If True, use only the first 100 elements of the dataset.
         """
         self.sequence_length = sequence_length
         self.enc = tiktoken.get_encoding("gpt2")
         self.eot = self.enc._special_tokens["<|endoftext|>"]
-        self.dataset = load_dataset(
-            dataset_name, dataset_config, split=split, streaming=True
-        )
-        
-        if debug_mode:
-            print("Debug mode: Using only the first 100 elements of the dataset.")
-            self.dataset = self.dataset.select(range(min(100, len(dataset))))
-        
+        self.dataset = dataset
+
         print("Calculating document lengths...")
         self.doc_lengths = []
         self.total_samples = 0
         self.cumulative_samples = [0]
-        
+
         for doc in tqdm(self.dataset, desc="Analyzing documents", unit="doc"):
             length = len(self.tokenize(doc))
             self.doc_lengths.append(length)
             samples = max(0, (length - 1) // self.sequence_length)
             self.total_samples += samples
             self.cumulative_samples.append(self.total_samples)
-        
+
         print(f"Total samples: {self.total_samples}")
         if self.total_samples == 0:
-            print("Warning: No samples could be created with the given sequence length. Try reducing the sequence length.")
+            print(
+                "Warning: No samples could be created with the given sequence length. Try reducing the sequence length."
+            )
 
     def tokenize(self, doc):
         """
@@ -101,7 +82,9 @@ class HuggingFacePreparedTextDataset(Dataset):
         tokens = [self.eot]  # the special token delimits all documents
         tokens.extend(self.enc.encode_ordinary(doc["text"]))
         tokens_np = np.array(tokens)
-        assert (0 <= tokens_np).all() and (tokens_np < 2**16).all(), "token dictionary too large for uint16"
+        assert (0 <= tokens_np).all() and (
+            tokens_np < 2**16
+        ).all(), "token dictionary too large for uint16"
         tokens_np_uint16 = tokens_np.astype(np.uint16)
         return tokens_np_uint16
 
@@ -109,26 +92,33 @@ class HuggingFacePreparedTextDataset(Dataset):
         """
         Returns the total number of samples in the dataset.
         """
-        return max(1, self.total_samples)  # Return at least 1 to avoid empty dataset errors
+        return max(
+            1, self.total_samples
+        )  # Return at least 1 to avoid empty dataset errors
 
     def __getitem__(self, idx):
         """
         Returns a specific sample from the dataset.
-        
+
         Args:
         idx (int): Index of the sample to retrieve.
-        
+
         Returns:
         tuple: A tuple containing input tensor (x) and target tensor (y).
         """
         if self.total_samples == 0:
             # If no valid samples, return a dummy sample
-            return torch.zeros(self.sequence_length, dtype=torch.long), torch.zeros(self.sequence_length, dtype=torch.long)
+            return torch.zeros(self.sequence_length, dtype=torch.long), torch.zeros(
+                self.sequence_length, dtype=torch.long
+            )
 
         idx = idx % self.total_samples  # Ensure idx is within range
 
         # Find which document this index corresponds to
-        doc_idx = next(i for i, count in enumerate(self.cumulative_samples) if count > idx) - 1
+        doc_idx = (
+            next(i for i, count in enumerate(self.cumulative_samples) if count > idx)
+            - 1
+        )
 
         # Get the document and tokenize it
         document = self.dataset[doc_idx]
@@ -143,12 +133,19 @@ class HuggingFacePreparedTextDataset(Dataset):
 
         # Pad if necessary
         if len(buf) < self.sequence_length + 1:
-            buf = np.pad(buf, (0, self.sequence_length + 1 - len(buf)), mode='constant', constant_values=self.eot)
+            buf = np.pad(
+                buf,
+                (0, self.sequence_length + 1 - len(buf)),
+                mode="constant",
+                constant_values=self.eot,
+            )
 
         x = buf[:-1]  # inputs
-        y = buf[1:]   # targets
+        y = buf[1:]  # targets
 
-        return torch.from_numpy(x.astype(np.int64)), torch.from_numpy(y.astype(np.int64))
+        return torch.from_numpy(x.astype(np.int64)), torch.from_numpy(
+            y.astype(np.int64)
+        )
 
     def __iter__(self):
         """
@@ -157,75 +154,61 @@ class HuggingFacePreparedTextDataset(Dataset):
         for idx in tqdm(range(len(self)), desc="Iterating over dataset", unit="sample"):
             yield self.__getitem__(idx)
 
-class HuggingFaceStreamingTextDataset(IterableDataset):
-    """Custom Iterable Dataset for loading and processing large text documents from Hugging Face datasets for language modeling."""
 
-    def __init__(self, dataset_name, dataset_config, split, sequence_length, nb_tokens):
-        """
-        Initializes the dataset with dataset information and sequence length.
+def create_train_val_datasets(
+    dataset_name,
+    dataset_config,
+    sequence_length: int = 1024,
+    val_split: float = 0.1,
+    debug_mode: bool = False,
+):
+    """
+    Creates and returns both training and validation datasets.
 
-        Args:
-            dataset_name (str): Name of the dataset in Hugging Face datasets.
-            dataset_config (str): Specific configuration or subset of the dataset.
-            split (str): Which split of the dataset to load (e.g., 'train').
-            sequence_length (int): The number of tokens in each sample.
-        """
-        self.dataset = load_dataset(
-            dataset_name, dataset_config, split=split, streaming=True
-        )
-        self.sequence_length = sequence_length
-        self.nb_tokens = nb_tokens
+    Args:
+    dataset_name (str): Name of the dataset in Hugging Face datasets.
+    dataset_config (str): Specific configuration or subset of the dataset.
+    sequence_length (int): The number of tokens in each sample.
+    val_split (float): Fraction of the dataset to use for validation (0.0 to 1.0).
+    debug_mode (bool): If True, use only the first 100 elements of the dataset.
 
-    def __iter__(self):
-        """
-        Returns an iterator over tokenized chunks of sequence_length from the dataset.
-        """
-        for document in self.dataset:
-            tokenized_doc = tokenize(document)
+    Returns:
+    tuple: (train_dataset, val_dataset)
+    """
+    full_dataset = load_dataset(dataset_name, dataset_config, split="train")
 
-            num_samples = len(tokenized_doc) // self.sequence_length
-            for idx in range(num_samples):
-                start_idx = idx * self.sequence_length
-                end_idx = start_idx + self.sequence_length + 1  # +1 for target shift
-                buf = tokenized_doc[start_idx:end_idx]
+    if debug_mode:
+        print("Debug mode: Using only the first 10000 elements of the dataset.")
+        full_dataset = full_dataset.take(10000)
 
-                if len(buf) < self.sequence_length + 1:
-                    continue
+    dataset_size = len(full_dataset)
+    val_size = int(val_split * dataset_size)
+    train_size = dataset_size - val_size
 
-                x = buf[:-1]  # inputs
-                y = buf[1:]  # targets
+    train_dataset = full_dataset.skip(val_size)
+    val_dataset = full_dataset.take(val_size)
 
-                x = x.astype(np.int64)
-                y = y.astype(np.int64)
+    train_data = HuggingFacePreparedTextDataset(
+        train_dataset, sequence_length=sequence_length
+    )
+    val_data = HuggingFacePreparedTextDataset(
+        val_dataset, sequence_length=sequence_length
+    )
 
-                yield torch.tensor(x, dtype=torch.long), torch.tensor(
-                    y, dtype=torch.long
-                )
-
-    def __len__(self):
-        """Returns the total number of samples available."""
-        return len(self.nb_tokens) // self.sequence_length
+    return train_data, val_data
 
 
 if __name__ == "__main__":
-    sequence_length = 1024
-    dataset = HuggingFaceStreamingTextDataset(
-        "HuggingFaceFW/fineweb-edu", "sample-10BT", "train", sequence_length
-    )
-    data_iter = iter(dataset)
 
-    dataloader = DataLoader(
-        HuggingFaceStreamingTextDataset(
-            dataset_name="HuggingFaceFW/fineweb-edu",
-            dataset_config="sample-10BT",
-            split="train",
-            sequence_length=32,
-            nb_tokens=9.6e9,  # Because of streaming cannot have the exact number of token so use an estimate
-        ),
-        batch_size=4,
+    train_dataset, val_dataset = create_train_val_datasets(
+        "HuggingFaceFW/fineweb-edu",
+        "sample-10BT",
+        sequence_length=1024,
+        debug_mode=True,
     )
+    train_dataloader = DataLoader(train_dataset, batch_size=32)
 
-    for i, data in enumerate(dataloader):
+    for i, data in enumerate(train_dataloader):
         inputs, targets = data
         print("Batch", i + 1)
         print("Inputs:", inputs)
