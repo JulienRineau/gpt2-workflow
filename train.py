@@ -138,15 +138,15 @@ if __name__ == "__main__":
 
     model_config = GPTConfig(vocab_size=50304)
     trainer_config = TrainerConfig()
-    model = GPTLightning(model_config, trainer_config, debug_mode=True)
+    model = GPTLightning(model_config, trainer_config, debug_mode=False)
 
     trainer = pl.Trainer(
-        max_epochs=10,
+        max_epochs=1,
         # max_steps=50,
         precision="bf16-mixed",
         logger=wandb_logger,
         gradient_clip_val=1.0,
-        # accumulate_grad_batches=7,
+        accumulate_grad_batches=7,
         gradient_clip_algorithm="value",
         log_every_n_steps=1,
     )
